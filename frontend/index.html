@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <meta name="robots" content="noindex, nofollow, noarchive, nosnippet" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#ffffff" />
+    <script src="/assets/theme-boot.js"></script>
+    <meta
+      name="description"
+      content="Lock a secret in your browser and share a link that opens just once."
+    />
+    <meta property="og:title" content="A secure secret is waiting" />
+    <meta property="og:description" content="Say it once. Then it's gone." />
+    <title>unkeep — one-time secret link</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/styles.css" />
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <div id="app">
+      <p class="boot">
+        A secure secret service. JavaScript is required to encrypt or reveal a
+        secret.
+      </p>
+    </div>
+    <noscript>
+      <p class="boot">
+        JavaScript is required. This page cannot decrypt or reveal a secret
+        without it.
+      </p>
+    </noscript>
+  </body>
+</html>

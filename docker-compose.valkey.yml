@@ -1,0 +1,64 @@
+# The compose project name still follows the checkout directory so the running
+# Valkey container keeps its unread secrets across this rename. Migrate the
+# ns:* keys before renaming the project or the Valkey prefix.
+services:
+  valkey:
+    image: valkey/valkey:9-alpine
+    user: "999:1000"
+    command:
+      - valkey-server
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+      - --maxmemory
+      - 2gb
+      - --maxmemory-policy
+      - noeviction
+      - --requirepass
+      - "${VALKEY_PASSWORD:?VALKEY_PASSWORD is required}"
+      - --logfile
+      - ""
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 2304m
+    memswap_limit: 2304m
+    restart: unless-stopped
+    environment:
+      VALKEY_PASSWORD: "${VALKEY_PASSWORD:?VALKEY_PASSWORD is required}"
+    healthcheck:
+      test: ["CMD-SHELL", "valkey-cli -a \"$${VALKEY_PASSWORD}\" ping | grep -q PONG"]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+
+  app:
+    build: .
+    image: unkeep:valkey
+    ports:
+      - "127.0.0.1:8080:8080"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
+    memswap_limit: 512m
+    stop_grace_period: 15s
+    restart: unless-stopped
+    depends_on:
+      valkey:
+        condition: service_healthy
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8080
+      GOMEMLIMIT: 400MiB
+      VALKEY_URL: "redis://:${VALKEY_PASSWORD:?VALKEY_PASSWORD is required}@valkey:6379/0"
+      VALKEY_PREFIX: "ns:"
+      # openssl rand -base64 32 | tr '+/' '-_' | tr -d '='
+      SESSION_SECRET: "${SESSION_SECRET:?set SESSION_SECRET}"
+      ALLOWED_HOSTS: "127.0.0.1,localhost"
+      MAX_TOTAL_MB: "1536"
