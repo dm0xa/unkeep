@@ -1,0 +1,114 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    name: Go (vet, test, race)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.x"
+          cache: true
+      - run: go vet ./...
+      - run: go test -count=1 ./...
+      - run: go test -race -count=1 ./...
+
+  valkey:
+    name: Valkey integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.x"
+          cache: true
+      - name: Start volatile Valkey
+        run: |
+          docker run -d --name valkey -p 127.0.0.1:6380:6379 \
+            valkey/valkey:9-alpine \
+            valkey-server --save "" --appendonly no --maxmemory 512mb --maxmemory-policy noeviction
+          for _ in $(seq 1 30); do
+            docker exec valkey valkey-cli ping >/dev/null 2>&1 && exit 0
+            sleep 1
+          done
+          echo "Valkey did not become ready" >&2
+          docker logs valkey
+          exit 1
+      - name: Run Valkey tests
+        env:
+          VALKEY_URL: redis://127.0.0.1:6380/0
+        run: go test -count=1 ./backend -run 'Valkey|APIWithValkey'
+
+  frontend:
+    name: Frontend (test, build, committed bundle)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+      - name: Committed bundle matches sources
+        working-directory: .
+        run: |
+          if ! git diff --exit-code -- frontend/dist; then
+            echo "frontend/dist is stale: rebuild and commit the bundle." >&2
+            exit 1
+          fi
+
+  image:
+    name: Container image
+    runs-on: ubuntu-latest
+    needs: [go, frontend]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: docker build --build-arg VERSION=ci -t unkeep:ci .
+      - name: Smoke test
+        run: |
+          docker run -d --rm --name unkeep-ci -p 127.0.0.1:8080:8080 \
+            --read-only --cap-drop=ALL --security-opt no-new-privileges:true \
+            --memory=512m --memory-swap=512m -e GOMEMLIMIT=400MiB \
+            unkeep:ci
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/healthz >/dev/null; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          test "${ready:-0}" = 1
+          curl -fsS http://127.0.0.1:8080/readyz >/dev/null
+          docker stop unkeep-ci
+
+  vuln:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.x"
+          cache: true
+      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
