@@ -42,7 +42,7 @@ jobs:
             -ldflags="-s -w -X main.buildVersion=${GITHUB_REF_NAME}" \
             -o dist/unkeep ./backend
           tar -C dist -czf "unkeep_${GITHUB_REF_NAME}_${GOOS}_${GOARCH}.tar.gz" unkeep
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: unkeep-${{ matrix.goos }}-${{ matrix.goarch }}
           path: unkeep_*.tar.gz
