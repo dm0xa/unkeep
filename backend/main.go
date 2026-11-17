@@ -61,6 +61,7 @@ func main() {
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		_ = httpServer.Close()
 	}
-	app.Close()
+	// Log before Close: Close flushes and stops the logger.
 	cfg.Logger.Log(LogEntry{Level: "info", Route: "shutdown"})
+	app.Close()
 }
