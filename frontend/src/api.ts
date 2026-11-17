@@ -40,6 +40,9 @@ async function request<T>(
     cache: "no-store",
     credentials: "same-origin",
     referrerPolicy: "no-referrer",
+    // A half-open connection must not strand the UI on "Locking…" or
+    // "Revealing…"; every caller already has an error path.
+    signal: AbortSignal.timeout(15_000),
     ...init,
   });
   if (!response.ok) {
@@ -99,6 +102,9 @@ export function confirmDecrypted(
         "X-Not-Saved-Confirm": "reveal",
       },
       body: JSON.stringify({ viewToken }),
+      // The recipient is told to close the tab right after revealing; keepalive
+      // lets the event land even when they do.
+      keepalive: true,
     },
   );
 }

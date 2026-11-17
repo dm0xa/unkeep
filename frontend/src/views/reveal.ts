@@ -14,7 +14,7 @@ import {
   unlockFragment,
   type FragmentMaterial,
 } from "../linkkey.ts";
-import type { PlaintextEnvelope } from "../types.ts";
+import type { OpenResponse, PlaintextEnvelope } from "../types.ts";
 import {
   formatWait,
   nextUnlockAttempts,
@@ -39,7 +39,16 @@ export function renderReveal(main: HTMLElement, id: string): void {
   const fragment = location.hash.startsWith("#") ? location.hash.slice(1) : "";
   const material = readFragment(fragment);
   if (!material) {
-    main.replaceChildren(incompleteLinkView());
+    // After a reveal the fragment is stripped from the address bar, so a reload
+    // lands here. Report that instead of claiming the sender's link is broken.
+    main.replaceChildren(
+      revealedHere(id)
+        ? errorView(
+            "This secret was already revealed.",
+            "It was burned when you revealed it, and this tab cannot show it again. If you did not save it, ask the sender for a new secret.",
+          )
+        : incompleteLinkView(),
+    );
     return;
   }
 
@@ -84,7 +93,8 @@ export function renderReveal(main: HTMLElement, id: string): void {
   };
   window.addEventListener("pagehide", cleanup);
   window.addEventListener("pageshow", (event) => {
-    if (!event.persisted) {
+    // A previous render's handler must not repaint the live view.
+    if (!main.isConnected || !event.persisted) {
       return;
     }
     if (revealedOnce) {
@@ -94,6 +104,21 @@ export function renderReveal(main: HTMLElement, id: string): void {
           "It was burned when you revealed it, and this page cannot show it again. If you did not save it, ask the sender for a new secret.",
         ),
       );
+      return;
+    }
+    // An app switch fires pagehide, which wipes the key from memory. The link
+    // still holds it, so restore from the fragment instead of asking the
+    // recipient to reload and start over.
+    const replay = readFragment(
+      location.hash.startsWith("#") ? location.hash.slice(1) : "",
+    );
+    if (replay?.version === 1) {
+      keyBytes = replay.key;
+      renderInterstitial();
+      return;
+    }
+    if (replay?.version === 2) {
+      renderPassphrase(replay);
       return;
     }
     if (keyBytes === null) {
@@ -415,16 +440,72 @@ export function renderReveal(main: HTMLElement, id: string): void {
       label.textContent = "Revealing…";
     }
 
-    try {
-      const proof = await openProof(keyBytes);
-      const opened = await openSecret(id, challenge, proof);
-      const plaintext = await decryptSecret(opened.envelope, keyBytes);
-      burnedAt = opened.burnedAt;
+    // Once the server has released the ciphertext the record is gone. Until
+    // then a 429, an expired challenge, or a dropped connection leaves the
+    // secret intact, so the key and the URL fragment must survive: wiping them
+    // would destroy a link the sender can still see as unread.
+    const discardMaterial = (): void => {
       if (keyBytes) {
         wipe(keyBytes);
         keyBytes = null;
       }
       history.replaceState(null, "", location.pathname);
+    };
+
+    const retry = (): void => {
+      void loadChallenge(null);
+    };
+
+    try {
+      const proof = await openProof(keyBytes);
+      let opened: OpenResponse;
+      try {
+        opened = await openSecret(id, challenge, proof);
+      } catch (error) {
+        if (error instanceof ApiError) {
+          if (error.status === 429) {
+            main.replaceChildren(
+              errorView(
+                "Too many attempts.",
+                "Wait a minute, then try again. Nothing was revealed and nothing was burned.",
+                { label: "Try again", onClick: retry },
+              ),
+            );
+            return;
+          }
+          if (error.status === 403 && isChallengeExpiry(error)) {
+            main.replaceChildren(
+              errorView(
+                "The confirmation window closed.",
+                "Nothing was revealed and nothing was burned. Confirm again to continue.",
+                { label: "Try again", onClick: retry },
+              ),
+            );
+            return;
+          }
+        }
+        if (isTransportFailure(error)) {
+          main.replaceChildren(
+            errorView(
+              "No answer from the server.",
+              "The request did not complete. If it was already released, this link will show as opened; otherwise nothing was burned.",
+              { label: "Try again", onClick: retry },
+            ),
+          );
+          return;
+        }
+        discardMaterial();
+        if (error instanceof ApiError && error.status === 410) {
+          renderUnavailable();
+        } else {
+          renderCouldNotOpen();
+        }
+        return;
+      }
+
+      const plaintext = await decryptSecret(opened.envelope, keyBytes);
+      burnedAt = opened.burnedAt;
+      discardMaterial();
       const confirmation = confirmDecrypted(id, opened.viewToken).catch(
         () => undefined,
       );
@@ -432,31 +513,11 @@ export function renderReveal(main: HTMLElement, id: string): void {
       secretText = plaintext.secret;
       renderSecret();
       await confirmation;
-    } catch (error) {
-      if (keyBytes) {
-        wipe(keyBytes);
-        keyBytes = null;
-      }
-      history.replaceState(null, "", location.pathname);
-      if (error instanceof ApiError && error.status === 410) {
-        renderUnavailable();
-      } else if (error instanceof ApiError && error.status === 403) {
-        if (error.message.toLowerCase().includes("expired")) {
-          main.replaceChildren(
-            errorView(
-              "Confirmation expired.",
-              "The short-lived confirmation window closed before the secret was opened. Reload the complete original link and try again.",
-              { label: "Reload", onClick: () => location.reload() },
-            ),
-          );
-        } else {
-          renderCouldNotOpen();
-        }
-      } else if (error instanceof ApiError && error.status === 429) {
-        renderRateLimited();
-      } else {
-        renderCouldNotOpen();
-      }
+    } catch {
+      // openProof or decryptSecret failed: the ciphertext is already burned or
+      // never left the browser.
+      discardMaterial();
+      renderCouldNotOpen();
     } finally {
       busy = false;
     }
@@ -466,6 +527,7 @@ export function renderReveal(main: HTMLElement, id: string): void {
     document.title = `Secret revealed — ${PRODUCT}`;
     stopCountdown();
     revealedOnce = true;
+    markRevealed(id);
     const column = page();
     const stage = el("section", "stage");
 
@@ -573,7 +635,7 @@ export function renderReveal(main: HTMLElement, id: string): void {
     main.replaceChildren(
       errorView(
         "This secret could not be opened.",
-        "It may have been viewed already, altered in transit, or the key may be incomplete. The stored copy has been destroyed.",
+        "The key in this link does not match the stored copy, or the stored copy was already released. Nothing else changes: if it was released, it cannot be opened again.",
       ),
     );
   };
@@ -583,6 +645,36 @@ export function renderReveal(main: HTMLElement, id: string): void {
   } else {
     renderInterstitial();
   }
+}
+
+const REVEALED_PREFIX = "unkeep-revealed-";
+
+function revealedHere(id: string): boolean {
+  try {
+    return sessionStorage.getItem(REVEALED_PREFIX + id) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function markRevealed(id: string): void {
+  try {
+    sessionStorage.setItem(REVEALED_PREFIX + id, "1");
+  } catch {
+    // Storage may be unavailable; the in-memory flag still covers this page.
+  }
+}
+
+function isChallengeExpiry(error: ApiError): boolean {
+  return error.message.toLowerCase().includes("expired");
+}
+
+function isTransportFailure(error: unknown): boolean {
+  return (
+    error instanceof TypeError ||
+    (error instanceof DOMException &&
+      (error.name === "AbortError" || error.name === "TimeoutError"))
+  );
 }
 
 function factItemNode(label: string, value: HTMLElement): HTMLElement {

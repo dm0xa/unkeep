@@ -8,6 +8,46 @@ const root = document.getElementById("app");
 if (root) {
   render();
   window.addEventListener("popstate", render);
+  // Same-origin links to SPA routes navigate in place: a full reload would
+  // re-download and re-parse the bundle to show the same document.
+  document.addEventListener("click", (event) => {
+    if (
+      event.defaultPrevented ||
+      event.button !== 0 ||
+      event.metaKey ||
+      event.ctrlKey ||
+      event.shiftKey ||
+      event.altKey
+    ) {
+      return;
+    }
+    const target = event.target;
+    if (!(target instanceof Element)) {
+      return;
+    }
+    const anchor = target.closest("a");
+    if (
+      !(anchor instanceof HTMLAnchorElement) ||
+      anchor.target ||
+      anchor.hasAttribute("download") ||
+      anchor.origin !== location.origin ||
+      anchor.search
+    ) {
+      return;
+    }
+    const path = anchor.pathname.replace(/\/+$/, "") || "/";
+    if (!isAppRoute(path)) {
+      return;
+    }
+    event.preventDefault();
+    history.pushState(null, "", path);
+    window.scrollTo(0, 0);
+    render();
+  });
+}
+
+function isAppRoute(path: string): boolean {
+  return path === "/" || /^\/(s|receipt)\/[^/]+$/.test(path);
 }
 
 function render(): void {

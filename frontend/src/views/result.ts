@@ -45,7 +45,6 @@ export function renderResult(main: HTMLElement, result: ResultInput): void {
         "info",
         "Send the passphrase separately. ",
         "The link alone will not open it. Two channels, two messages.",
-        "key",
       ),
     );
   }
@@ -105,19 +104,38 @@ export function renderResult(main: HTMLElement, result: ResultInput): void {
   again.style.marginLeft = "0";
   col.appendChild(again);
 
+  // This page holds the only copy of the link. A reload or a stray navigation
+  // leaves the ciphertext stored until expiry with no way to open it, so warn
+  // before unloading, and refill the fields if the page comes back from the
+  // back/forward cache.
+  const guard = (event: BeforeUnloadEvent): void => {
+    event.preventDefault();
+    event.returnValue = "";
+  };
+  window.addEventListener("beforeunload", guard);
+  again.addEventListener("click", () => {
+    window.removeEventListener("beforeunload", guard);
+  });
+  window.addEventListener("pageshow", (event) => {
+    if (!main.isConnected || !event.persisted) {
+      return;
+    }
+    shareInput.value = result.shareUrl;
+    receiptInput.value = result.receiptUrl;
+  });
+
   const split = el("div", "split");
   split.append(col, rail);
   column.appendChild(split);
   main.replaceChildren(column);
 
-  window.addEventListener(
-    "pagehide",
-    () => {
-      shareInput.value = "";
-      receiptInput.value = "";
-    },
-    { once: true },
-  );
+  window.addEventListener("pagehide", () => {
+    if (!main.isConnected) {
+      return;
+    }
+    shareInput.value = "";
+    receiptInput.value = "";
+  });
 }
 
 function showRevokeIdle(
@@ -186,7 +204,6 @@ async function revoke(
           "danger",
           "Receipt no longer available",
           "The receipt retention window has ended, so this link can no longer be revoked from here. It will expire on its own.",
-          "alert",
         ),
       );
       return;
@@ -199,7 +216,6 @@ async function revoke(
         "danger",
         "The link was not burned",
         "The burn was not confirmed. Check your connection and try again; the link is still live.",
-        "alert",
       ),
     );
   }
@@ -211,7 +227,6 @@ function terminalNotice(state: ReceiptState, revokedAt?: number): HTMLElement {
       "info",
       "Link burned",
       `The unread copy was destroyed${revokedAt ? ` at ${formatUTC(revokedAt)}` : ""}. The recipient will see that it is unavailable.`,
-      "eyeOff",
     );
   }
   if (state === "burned") {
@@ -219,7 +234,6 @@ function terminalNotice(state: ReceiptState, revokedAt?: number): HTMLElement {
       "info",
       "Already burned",
       "The recipient already opened this secret. There is nothing left to revoke.",
-      "check",
     );
   }
   if (state === "expired") {
@@ -227,13 +241,11 @@ function terminalNotice(state: ReceiptState, revokedAt?: number): HTMLElement {
       "info",
       "Already expired",
       "The expiry time passed before the secret was read. There is nothing left to revoke.",
-      "clock",
     );
   }
   return notice(
     "info",
     "Nothing to revoke",
     "The secret is no longer available.",
-    "shield",
   );
 }

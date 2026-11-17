@@ -5,6 +5,8 @@ import { formatUTC } from "../format.ts";
 import type { ReceiptEvent, ReceiptEventType, ReceiptView } from "../types.ts";
 import { PRODUCT, errorView, page } from "./shared.ts";
 
+// Fast while the recipient is likely mid-flow, then a slow trickle: a sender
+// tab left open for an hour costs ~114 requests instead of 1,800.
 const POLL_MS = 2_000;
 
 const EVENT_COPY: Record<
@@ -97,6 +99,15 @@ export function renderReceipt(main: HTMLElement, id: string): void {
   let stopped = false;
   let inFlight = false;
   let timer: number | undefined;
+  // A burned receipt can still receive the recipient's "decrypted"
+  // confirmation; poll a few times at a slower cadence, then stop for good.
+  let afterBurnPolls = 0;
+  let renderedEvents = "";
+  const pollStartedAt = Date.now();
+  const nextDelay = (): number => {
+    const age = Date.now() - pollStartedAt;
+    return age < 20_000 ? 2_000 : age < 120_000 ? 5_000 : age < 600_000 ? 15_000 : 60_000;
+  };
 
   const schedule = (delay = POLL_MS): void => {
     if (stopped) {
@@ -125,8 +136,19 @@ export function renderReceipt(main: HTMLElement, id: string): void {
         finish("Final — no further events");
         return;
       }
-      stateLabel.textContent = "Live — updates every 2 seconds";
-      schedule();
+      if (view.state === "burned") {
+        afterBurnPolls += 1;
+        if (afterBurnPolls > 3) {
+          finish("Final — no further events");
+          return;
+        }
+        stateLabel.textContent = "Burned — waiting for the final confirmation";
+        schedule(10_000);
+        return;
+      }
+      const delay = nextDelay();
+      stateLabel.textContent = `Live — next check in ${delay / 1000} s`;
+      schedule(delay);
     } catch (error) {
       if (error instanceof ApiError && error.status === 404) {
         finish("Receipt closed");
@@ -181,9 +203,15 @@ export function renderReceipt(main: HTMLElement, id: string): void {
       statusSub.textContent = "No one has opened the link yet.";
     }
 
-    timeline.replaceChildren();
-    for (const event of events) {
-      timeline.appendChild(renderEvent(event));
+    // Rebuild only when the log actually changed: replacing identical rows
+    // every two seconds makes an aria-live region re-read the whole list.
+    const eventKey = events.map((event) => `${event.type}@${event.at}`).join("|");
+    if (eventKey !== renderedEvents) {
+      renderedEvents = eventKey;
+      timeline.replaceChildren();
+      for (const event of events) {
+        timeline.appendChild(renderEvent(event));
+      }
     }
 
     meta.replaceChildren();

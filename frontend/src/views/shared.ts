@@ -142,9 +142,7 @@ export function notice(
   kind: NoticeKind,
   title: string,
   body: string,
-  iconName: IconName = "shield",
 ): HTMLElement {
-  void iconName;
   const node = el("p", kind === "danger" || kind === "warn" ? "note note--danger" : "note");
   const lead = el("strong", "", title);
   node.append(lead, document.createTextNode(body));

@@ -14,7 +14,7 @@ import { icon } from "../icons.ts";
 import { encodeFragment } from "../linkkey.ts";
 import { generatePassphrase } from "../passphrase.ts";
 import type { SecretEnvelope } from "../types.ts";
-import { PRODUCT_TITLE, copyButton, page, pageHead } from "./shared.ts";
+import { PRODUCT_TITLE, copyButton, notice, page, pageHead } from "./shared.ts";
 import { renderResult } from "./result.ts";
 
 const EXPIRY_OPTIONS = [
@@ -119,6 +119,10 @@ export function renderCreate(main: HTMLElement): void {
     passphraseInput.value = phrase;
     passphraseInput.focus();
     passphraseInput.setSelectionRange(phrase.length, phrase.length);
+    // Say the trade-off where it is made: five random words are easy to retype
+    // and only about 25 bits, so an offline guess is slowed, not prevented.
+    passphraseHint.textContent =
+      "Generated phrases are easy to retype but only ~25 bits: a speed bump, not a secret. For anything valuable, type your own long passphrase. Share it another way; without it the link is useless.";
   });
   const copyPhrase = copyButton(() => passphraseInput.value, "Copy", "phrase-copy");
   copyPhrase.title = "Copy passphrase";
@@ -179,6 +183,15 @@ export function renderCreate(main: HTMLElement): void {
   const submitLabel = el("span", "", "Create one-time link");
   submit.append(submitIcon, submitLabel);
   actions.appendChild(submit);
+  if (!canEncrypt) {
+    actions.prepend(
+      notice(
+        "danger",
+        "This browser cannot encrypt.",
+        "Web Crypto with AES-256-GCM is required. Open this page over HTTPS in a current browser; the button stays disabled until then.",
+      ),
+    );
+  }
 
   form.append(secretField, expirySet, passphraseSet, warn, errorNode, actions);
 
@@ -324,8 +337,12 @@ export function renderCreate(main: HTMLElement): void {
         throw new Error("verification failed");
       }
       const proof = await openProof(keyBytes);
-      const keyMaterial = await encodeFragment(keyBytes, passphrase);
-      const result = await createSecret(envelope, ttlSeconds, proof);
+      // PBKDF2 (600k rounds) only wraps the fragment the sender will copy; the
+      // upload does not depend on it, so both run at once.
+      const [keyMaterial, result] = await Promise.all([
+        encodeFragment(keyBytes, passphrase),
+        createSecret(envelope, ttlSeconds, proof),
+      ]);
       const shareUrl = `${location.origin}/s/${encodeURIComponent(result.secretId)}#${keyMaterial}`;
       const receiptUrl = `${location.origin}/receipt/${encodeURIComponent(result.secretId)}#${result.receiptToken}`;
 

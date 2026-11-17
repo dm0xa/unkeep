@@ -7,7 +7,33 @@
     <meta name="robots" content="noindex, nofollow, noarchive, nosnippet" />
     <meta name="color-scheme" content="light dark" />
     <meta name="theme-color" content="#ffffff" />
-    <script src="/assets/theme-boot.js"></script>
+    <!-- Inlined so first paint does not wait for a round trip. The server
+         derives its CSP script hash from this exact text at startup. -->
+    <script>
+      (function () {
+        var root = document.documentElement;
+        var stored = null;
+        try {
+          stored = window.localStorage.getItem("unkeep-theme");
+        } catch (error) {
+          stored = null;
+        }
+
+        if (stored === "light" || stored === "dark") {
+          root.setAttribute("data-theme", stored);
+        }
+
+        var dark =
+          stored === "dark" ||
+          (stored !== "light" &&
+            window.matchMedia("(prefers-color-scheme: dark)").matches);
+
+        var meta = document.querySelector('meta[name="theme-color"]');
+        if (meta) {
+          meta.setAttribute("content", dark ? "#0b0c0e" : "#ffffff");
+        }
+      })();
+    </script>
     <meta
       name="description"
       content="Lock a secret in your browser and share a link that opens just once."
@@ -16,6 +42,7 @@
     <meta property="og:description" content="Say it once. Then it's gone." />
     <title>unkeep — one-time secret link</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="modulepreload" href="/app.js" />
     <link rel="stylesheet" href="/styles.css" />
     <script type="module" src="/app.js"></script>
   </head>

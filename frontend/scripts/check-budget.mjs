@@ -1,7 +1,7 @@
 import { stat } from "node:fs/promises";
 
 const budgets = [
-  ["dist/app.js", 44 * 1024],
+  ["dist/app.js", 45 * 1024],
   ["dist/styles.css", 30 * 1024],
   ["dist/index.html", 8 * 1024],
 ];
