@@ -20,10 +20,13 @@ var buildVersion = "dev"
 // Config is the complete runtime configuration. The service has no database,
 // no filesystem persistence, and no outbound network calls.
 type Config struct {
-	Addr        string
-	TrustProxy  bool
-	TLSCertFile string
-	TLSKeyFile  string
+	Addr       string
+	TrustProxy bool
+	// TrustProxyHops is how many X-Forwarded-For entries the deployment's own
+	// proxies appended. 1 means a single edge proxy in front of the service.
+	TrustProxyHops int
+	TLSCertFile    string
+	TLSKeyFile     string
 
 	// AllowedHosts is the Host-header allowlist enforced on API routes.
 	// Entries may include a port; an entry without one matches any port.
@@ -103,6 +106,13 @@ func loadConfig() (Config, error) {
 		return Config{}, err
 	}
 	cfg.TrustProxy = trustProxy
+	cfg.TrustProxyHops, err = envInt("TRUST_PROXY_HOPS", 1)
+	if err != nil {
+		return Config{}, err
+	}
+	if cfg.TrustProxyHops < 1 {
+		return Config{}, fmt.Errorf("TRUST_PROXY_HOPS must be at least 1")
+	}
 	cfg.TLSCertFile = os.Getenv("TLS_CERT_FILE")
 	cfg.TLSKeyFile = os.Getenv("TLS_KEY_FILE")
 	if (cfg.TLSCertFile == "") != (cfg.TLSKeyFile == "") {

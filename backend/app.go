@@ -32,8 +32,9 @@ type Server struct {
 	session *sessionCodec
 	nonces  *NonceService
 	limiter *RateLimiter
-	store   SecretStore
-	metrics *Metrics
+	store    SecretStore
+	rateKeys *rateKeyer
+	metrics  *Metrics
 	logger  Logger
 
 	index  []byte
@@ -104,6 +105,9 @@ func NewServer(cfg Config) (*Server, error) {
 	if len(cfg.AllowedHosts) == 0 {
 		cfg.AllowedHosts = defaultAllowedHosts(cfg.Addr)
 	}
+	if cfg.TrustProxyHops < 1 {
+		cfg.TrustProxyHops = 1
+	}
 	if cfg.SessionSecret == nil {
 		cfg.SessionSecret = make([]byte, 32)
 		if _, err := rand.Read(cfg.SessionSecret); err != nil {
@@ -119,7 +123,8 @@ func NewServer(cfg Config) (*Server, error) {
 	s := &Server{
 		cfg:     cfg,
 		session: newSessionCodec(cfg.SessionSecret),
-		limiter: NewRateLimiter(cfg.Now, 100_000),
+		limiter:  NewRateLimiter(cfg.Now, 100_000),
+		rateKeys: newRateKeyer(cfg.SessionSecret),
 		metrics: &Metrics{},
 		logger:  cfg.Logger,
 		index:   index,
@@ -608,8 +613,8 @@ func (s *Server) methodNotAllowed(allow string) http.HandlerFunc {
 }
 
 func (s *Server) allow(w http.ResponseWriter, r *http.Request, scope string, perMinute int) bool {
-	ip := clientIP(r, s.cfg.TrustProxy)
-	bucket := scope + ":" + hex.EncodeToString(hmacKey(s.cfg.SessionSecret, "rate", ip))
+	ip := rateLimitIdentity(clientIP(r, s.cfg.TrustProxy, s.cfg.TrustProxyHops))
+	bucket := s.rateKeys.key(scope, ip)
 	burst := perMinute / 6
 	if burst < 3 {
 		burst = 3

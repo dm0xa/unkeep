@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 )
@@ -95,12 +96,23 @@ func requestIsHTTPS(r *http.Request, trustProxy bool) bool {
 	return trustProxy && strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 }
 
-func clientIP(r *http.Request, trustProxy bool) string {
+// clientIP returns the address a rate-limit bucket is keyed on. With
+// TRUST_PROXY the client is hops entries from the right of X-Forwarded-For:
+// proxies append the peer they saw, so the right-most entry is written by our
+// own edge. Taking the left-most entry would let any client choose its bucket.
+func clientIP(r *http.Request, trustProxy bool, hops int) string {
 	if trustProxy {
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			first := strings.TrimSpace(strings.Split(xff, ",")[0])
-			if net.ParseIP(first) != nil {
-				return first
+			entries := strings.Split(xff, ",")
+			if hops < 1 {
+				hops = 1
+			}
+			if hops > len(entries) {
+				hops = len(entries)
+			}
+			candidate := strings.TrimSpace(entries[len(entries)-hops])
+			if net.ParseIP(candidate) != nil {
+				return candidate
 			}
 		}
 	}
@@ -109,6 +121,22 @@ func clientIP(r *http.Request, trustProxy bool) string {
 		return r.RemoteAddr
 	}
 	return host
+}
+
+// rateLimitIdentity collapses addresses that one host controls: a single IPv6
+// subscriber owns a whole /64, so per-address limits would be free to bypass.
+func rateLimitIdentity(ip string) string {
+	addr, err := netip.ParseAddr(ip)
+	if err != nil {
+		return ip
+	}
+	addr = addr.Unmap()
+	if addr.Is6() {
+		if prefix, err := addr.Prefix(64); err == nil {
+			return prefix.String()
+		}
+	}
+	return addr.String()
 }
 
 func hmacKey(secret []byte, parts ...string) []byte {

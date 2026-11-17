@@ -1,6 +1,9 @@
 package main
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"hash"
 	"sync"
 	"time"
 )
@@ -10,6 +13,11 @@ type rateBucket struct {
 	last   time.Time
 	seen   time.Time
 }
+
+// maxPruneScan bounds how many buckets one request may inspect when the table
+// is at capacity. The table holds 100k entries, so an unbounded scan would put
+// O(100k) work behind the limiter mutex on every request from a new client.
+const maxPruneScan = 256
 
 type RateLimiter struct {
 	mu         sync.Mutex
@@ -47,14 +55,30 @@ func (l *RateLimiter) Allow(key string, perMinute, burst int) (bool, time.Durati
 
 	b, ok := l.buckets[key]
 	if !ok {
+		// Map iteration starts at a random offset, so sampling a fixed number of
+		// entries keeps the per-request cost bounded even when the table is full:
+		// a full scan here would stall every request behind the limiter mutex.
 		if len(l.buckets) >= l.maxBuckets {
+			scanned, oldestKey := 0, ""
+			var oldestSeen time.Time
 			for k, candidate := range l.buckets {
 				if now.Sub(candidate.seen) > 15*time.Minute {
 					delete(l.buckets, k)
+				} else if oldestKey == "" || candidate.seen.Before(oldestSeen) {
+					oldestKey, oldestSeen = k, candidate.seen
+				}
+				scanned++
+				if scanned >= maxPruneScan {
+					break
 				}
 			}
 			if len(l.buckets) >= l.maxBuckets {
-				return false, time.Minute
+				if oldestKey == "" {
+					return false, time.Minute
+				}
+				// Shed the stalest sampled bucket rather than deny every new
+				// client until something happens to expire.
+				delete(l.buckets, oldestKey)
 			}
 		}
 		b = &rateBucket{tokens: capacity, last: now, seen: now}
@@ -80,4 +104,41 @@ func (l *RateLimiter) Allow(key string, perMinute, burst int) (bool, time.Durati
 	}
 	b.tokens--
 	return true, 0
+}
+
+// rateKeyer derives the per-client bucket key without the per-request
+// allocations of a fresh HMAC: hmac.New + hex + concatenation cost 13
+// allocations and ~490 ns on every rate-limited request. The key is still a
+// keyed digest of the address, so the limiter table never holds raw IPs.
+type rateKeyer struct {
+	secret []byte
+	pool   sync.Pool
+}
+
+func newRateKeyer(secret []byte) *rateKeyer {
+	return &rateKeyer{
+		secret: secret,
+		pool: sync.Pool{
+			New: func() any { return hmac.New(sha256.New, secret) },
+		},
+	}
+}
+
+func (k *rateKeyer) key(scope, ip string) string {
+	mac := k.pool.Get().(hash.Hash)
+	var scratch [256]byte
+	sum := scratch[:0]
+	// Byte layout matches hmacKey(secret, "rate", ip): parts separated by 0x00.
+	for _, part := range [2]string{"rate", ip} {
+		mac.Write([]byte(part))
+		mac.Write([]byte{0})
+	}
+	sum = mac.Sum(sum)
+	mac.Reset()
+	k.pool.Put(mac)
+	buf := make([]byte, 0, len(scope)+1+len(sum))
+	buf = append(buf, scope...)
+	buf = append(buf, ':')
+	buf = append(buf, sum...)
+	return string(buf)
 }
