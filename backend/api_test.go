@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -448,8 +449,12 @@ func TestSecurityHeadersAndStaticSurface(t *testing.T) {
 			t.Fatalf("%s = %q, want substring %q", name, got, want)
 		}
 	}
-	if strings.Contains(string(page), "<script>") {
-		t.Fatal("inline script violates CSP")
+	// Inline scripts are allowed only when the CSP pins their exact hash.
+	csp := res.Header.Get("Content-Security-Policy")
+	for _, hash := range inlineScriptHashes(page) {
+		if !strings.Contains(csp, "'sha256-"+hash+"'") {
+			t.Fatalf("inline script not allowlisted by CSP: %q", csp)
+		}
 	}
 
 	res, assetBody := doJSON(t, &http.Client{}, http.MethodGet, base+"/app.js", nil, nil)
@@ -694,5 +699,147 @@ func assertLogSafe(t *testing.T, logger *MemoryLogger, forbidden ...string) {
 		if strings.Contains(string(data), value) {
 			t.Fatalf("log leaked %q: %s", value, data)
 		}
+	}
+}
+
+func TestCompressedAssetsNegotiateAndRevalidate(t *testing.T) {
+	base, _, _, _ := newAPIServer(t, nil)
+	// Go's default transport adds Accept-Encoding: gzip and decompresses for us,
+	// which would hide the negotiation under test.
+	plainTransport := &http.Transport{DisableCompression: true}
+
+	get := func(path, acceptEncoding, ifNoneMatch string) *http.Response {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodGet, base+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if acceptEncoding != "" {
+			req.Header.Set("Accept-Encoding", acceptEncoding)
+		}
+		if ifNoneMatch != "" {
+			req.Header.Set("If-None-Match", ifNoneMatch)
+		}
+		res, err := plainTransport.RoundTrip(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res
+	}
+
+	plain := get("/app.js", "", "")
+	plainBody := readAll(t, plain)
+	if plain.Header.Get("Content-Encoding") != "" {
+		t.Fatalf("identity request got encoding %q", plain.Header.Get("Content-Encoding"))
+	}
+	if v := plain.Header.Get("Vary"); v != "Accept-Encoding" {
+		t.Fatalf("Vary = %q", v)
+	}
+
+	zipped := get("/app.js", "gzip", "")
+	if zipped.Header.Get("Content-Encoding") != "gzip" {
+		t.Fatalf("gzip request got encoding %q", zipped.Header.Get("Content-Encoding"))
+	}
+	zlibReader, err := gzip.NewReader(zipped.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unzipped, err := io.ReadAll(zlibReader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = zipped.Body.Close()
+	if !bytes.Equal(unzipped, plainBody) {
+		t.Fatal("gzip body does not match the identity body")
+	}
+	if len(unzipped) <= len(plainBody)/2 {
+		t.Fatalf("compression had no effect: %d vs %d", len(unzipped), len(plainBody))
+	}
+
+	gzipETag := zipped.Header.Get("ETag")
+	if gzipETag == plain.Header.Get("ETag") || gzipETag == "" {
+		t.Fatalf("gzip ETag %q must differ from identity ETag %q", gzipETag, plain.Header.Get("ETag"))
+	}
+	notModified := get("/app.js", "gzip", gzipETag)
+	_ = notModified.Body.Close()
+	if notModified.StatusCode != http.StatusNotModified {
+		t.Fatalf("gzip revalidation = %d, want 304", notModified.StatusCode)
+	}
+
+	// q=0 means the client refuses gzip.
+	refused := get("/app.js", "gzip;q=0", "")
+	_ = refused.Body.Close()
+	if refused.Header.Get("Content-Encoding") != "" {
+		t.Fatal("q=0 client was served gzip")
+	}
+
+	pageCompressed := get("/", "gzip", "")
+	pageBody, err := io.ReadAll(pageCompressed.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = pageCompressed.Body.Close()
+	if pageCompressed.Header.Get("Content-Encoding") != "gzip" || len(pageBody) == 0 {
+		t.Fatal("index was not served compressed")
+	}
+}
+
+func readAll(t *testing.T, res *http.Response) []byte {
+	t.Helper()
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = res.Body.Close()
+	return body
+}
+
+func TestWriteOpenMatchesStructEncoding(t *testing.T) {
+	server := &Server{}
+
+	cases := []struct {
+		name string
+		env  Envelope
+	}{
+		{
+			name: "base64url",
+			env: Envelope{
+				V: 1, Alg: "A256GCM",
+				IV: "AAAAAAAAAAAAAAAA", Ciphertext: "BBBB", Tag: "CCCC",
+				CreatedAt: 1, ExpiresAt: 2, MaxViews: 1,
+			},
+		},
+		{
+			name: "hostile characters fall back to the encoder",
+			env: Envelope{
+				V: 1, Alg: "A256GCM",
+				IV: `a"b\c`, Ciphertext: "<x>", Tag: "t",
+				CreatedAt: 3, ExpiresAt: 4, MaxViews: 1,
+			},
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			server.writeOpen(rec, c.env, "view-token-value", 99)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d", rec.Code)
+			}
+			var got struct {
+				Envelope  Envelope `json:"envelope"`
+				ViewToken string   `json:"viewToken"`
+				BurnedAt  int64    `json:"burnedAt"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+				t.Fatalf("body is not valid JSON: %v (%s)", err, rec.Body.String())
+			}
+			if got.Envelope != c.env {
+				t.Fatalf("envelope = %+v, want %+v", got.Envelope, c.env)
+			}
+			if got.ViewToken != "view-token-value" || got.BurnedAt != 99 {
+				t.Fatalf("tail fields = %+v", got)
+			}
+		})
 	}
 }

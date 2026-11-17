@@ -7,7 +7,6 @@ import (
 	"io"
 	"mime"
 	"net/http"
-	"strings"
 	"time"
 )
 
@@ -159,9 +158,4 @@ func validateTTL(seconds int, cfg Config) (time.Duration, *requestError) {
 		return 0, badRequest("Expiry is outside the allowed range.")
 	}
 	return ttl, nil
-}
-
-func hasJSONContentType(r *http.Request) bool {
-	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
-	return err == nil && strings.EqualFold(mediaType, "application/json")
 }

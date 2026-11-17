@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -97,4 +98,37 @@ func TestCrossOriginChallengesDoNotConsumeRateLimit(t *testing.T) {
 		mustStatus(t, res, data, http.StatusForbidden)
 	}
 	challengeThroughAPI(t, client, base, created.SecretID)
+}
+
+func TestInlineBootScriptIsAllowlisted(t *testing.T) {
+	base, _, _, _ := newAPIServer(t, nil)
+	res, page := doJSON(t, &http.Client{}, http.MethodGet, base+"/", nil, nil)
+	mustStatus(t, res, page, http.StatusOK)
+
+	// The theme boot script must run before first paint, so it is inline and the
+	// CSP must carry its hash. Drift here silently reintroduces a theme flash.
+	hashes := inlineScriptHashes(page)
+	if len(hashes) != 1 {
+		t.Fatalf("inline scripts in index = %d, want 1", len(hashes))
+	}
+	csp := res.Header.Get("Content-Security-Policy")
+	if !strings.Contains(csp, "script-src 'self' 'sha256-"+hashes[0]+"'") {
+		t.Fatalf("CSP does not allowlist the inline script: %q", csp)
+	}
+
+	// The stylesheet is inlined at startup too, so first paint does not wait for
+	// a second round trip; its hash must be allowlisted the same way.
+	styleHashes := inlineStyleHashes(page)
+	if len(styleHashes) != 1 {
+		t.Fatalf("inline styles in index = %d, want 1", len(styleHashes))
+	}
+	if !strings.Contains(csp, "style-src 'self' 'sha256-"+styleHashes[0]+"'") {
+		t.Fatalf("CSP does not allowlist the inline stylesheet: %q", csp)
+	}
+	if bytes.Contains(page, []byte(`rel="stylesheet"`)) {
+		t.Fatal("stylesheet is still linked; inlining did not happen")
+	}
+	if strings.Contains(csp, "theme-boot.js") {
+		t.Fatal("CSP still references the removed external boot script")
+	}
 }
