@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -105,6 +104,7 @@ type Store struct {
 	receipts      map[string]*receiptRecord
 	terminalQueue []string
 	totalBytes    int64
+	lastSweep     time.Time
 	counters      storeCounters
 }
 
@@ -195,12 +195,30 @@ func NewStore(cfg StoreConfig) *Store {
 	}
 }
 
+// Create takes ownership of env's byte slices: they are wiped when the record
+// is burned, so the caller must not share them with another record.
 func (s *Store) Create(env validatedEnvelope, ttl time.Duration, proofHash [32]byte) (CreateResult, error) {
+	// Identifier material is generated before the lock: crypto/rand reads must
+	// not stall every other store operation behind the mutex.
+	id, err := s.newToken(16)
+	if err != nil {
+		return CreateResult{}, ErrInternal
+	}
+	receiptToken, err := s.newToken(32)
+	if err != nil {
+		return CreateResult{}, ErrInternal
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	now := s.cfg.Now()
-	s.sweepRecordsLocked(now)
+	// A full map scan on every create would serialise the store behind
+	// O(MaxSecrets) work. The background sweeper already expires records; only
+	// refresh the count when the previous scan is older than a second.
+	if now.Sub(s.lastSweep) >= time.Second {
+		s.sweepRecordsLocked(now)
+	}
 
 	if len(s.records) >= s.cfg.MaxSecrets {
 		return CreateResult{}, ErrStoreFull
@@ -216,21 +234,22 @@ func (s *Store) Create(env validatedEnvelope, ttl time.Duration, proofHash [32]b
 		return CreateResult{}, ErrStoreFull
 	}
 
-	id, err := s.newIDLocked()
-	if err != nil {
-		return CreateResult{}, ErrInternal
-	}
-	receiptToken, err := s.newTokenLocked(32)
-	if err != nil {
-		return CreateResult{}, ErrInternal
+	// A pre-generated ID collides only on a broken RNG; retry a few times before
+	// giving up rather than paying for a crypto/rand read on the common path.
+	for s.records[id] != nil {
+		next, genErr := s.newToken(16)
+		if genErr != nil {
+			return CreateResult{}, ErrInternal
+		}
+		id = next
 	}
 
 	expiresAt := now.Add(ttl)
 	record := &storedSecret{
 		id:         id,
-		iv:         bytes.Clone(env.IV),
-		ciphertext: bytes.Clone(env.Ciphertext),
-		tag:        bytes.Clone(env.Tag),
+		iv:         env.IV,
+		ciphertext: env.Ciphertext,
+		tag:        env.Tag,
 		proofHash:  proofHash,
 		createdAt:  now,
 		expiresAt:  expiresAt,
@@ -287,6 +306,13 @@ func (s *Store) Challenge(id string) (ChallengeInfo, error) {
 }
 
 func (s *Store) Consume(id string, proofHash [32]byte) (ConsumeResult, error) {
+	// Generated before the lock so every other store operation is not queued
+	// behind a crypto/rand read.
+	viewToken, err := s.newToken(32)
+	if err != nil {
+		return ConsumeResult{}, ErrInternal
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -298,11 +324,6 @@ func (s *Store) Consume(id string, proofHash [32]byte) (ConsumeResult, error) {
 	}
 	if !hashesEqual(record.proofHash, proofHash) {
 		return ConsumeResult{}, ErrProofMismatch
-	}
-
-	viewToken, err := s.newTokenLocked(32)
-	if err != nil {
-		return ConsumeResult{}, ErrInternal
 	}
 
 	envelope := Envelope{
@@ -493,6 +514,7 @@ func (s *Store) Ready() bool {
 }
 
 func (s *Store) sweepRecordsLocked(now time.Time) {
+	s.lastSweep = now
 	for id := range s.records {
 		s.expireIfNeededLocked(id, now)
 	}
@@ -597,20 +619,9 @@ func (s *Store) appendEventLocked(receipt *receiptRecord, eventType string, at t
 	receipt.events = append(receipt.events, ReceiptEvent{Type: eventType, At: at.UnixMilli()})
 }
 
-func (s *Store) newIDLocked() (string, error) {
-	for range 8 {
-		id, err := s.newTokenLocked(16)
-		if err != nil {
-			return "", err
-		}
-		if _, exists := s.records[id]; !exists {
-			return id, nil
-		}
-	}
-	return "", ErrInternal
-}
-
-func (s *Store) newTokenLocked(rawLen int) (string, error) {
+// newToken is lock-free: it only touches cfg.Rand, so callers may use it before
+// taking s.mu.
+func (s *Store) newToken(rawLen int) (string, error) {
 	buf := make([]byte, rawLen)
 	if _, err := io.ReadFull(s.cfg.Rand, buf); err != nil {
 		wipe(buf)
