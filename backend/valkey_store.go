@@ -40,6 +40,12 @@ type ValkeyStore struct {
 	readyMu    sync.Mutex
 	readyAt    time.Time
 	readyValue bool
+	probing    bool
+
+	memoryMu    sync.Mutex
+	memoryAt    time.Time
+	memoryValue int64
+	memoryValid bool
 }
 
 func NewValkeyStore(url, prefix string, cfg StoreConfig) (*ValkeyStore, error) {
@@ -106,7 +112,7 @@ func (s *ValkeyStore) Create(env validatedEnvelope, ttl time.Duration, proofHash
 	}
 
 	ctx, cancel := s.opCtx()
-	used, err := s.usedMemory(ctx)
+	used, err := s.cachedUsedMemory(ctx)
 	cancel()
 	if err != nil {
 		return CreateResult{}, mapValkeyError(err)
@@ -133,7 +139,7 @@ func (s *ValkeyStore) Create(env validatedEnvelope, ttl time.Duration, proofHash
 		secretKey, receiptKey, eventsKey := s.keys(id)
 		ctx, cancel := s.opCtx()
 		created, err := createScript.Run(ctx, s.client,
-			[]string{secretKey, receiptKey, eventsKey, s.secretIndex(), s.receiptIndex()},
+			[]string{secretKey, receiptKey, eventsKey, s.secretIndex(), s.receiptIndex(), s.statsKey()},
 			iv, ciphertext, tag, proofHex,
 			now.UnixMilli(), expiresAt.UnixMilli(),
 			secretTTL, tokenHash, receiptExpiresAt.UnixMilli(), receiptTTL, createdEvent,
@@ -145,7 +151,6 @@ func (s *ValkeyStore) Create(env validatedEnvelope, ttl time.Duration, proofHash
 		}
 		switch created {
 		case 1:
-			s.incrStats("creates")
 			s.invalidateReady()
 			return CreateResult{
 				SecretID:         id,
@@ -171,7 +176,7 @@ func (s *ValkeyStore) Challenge(id string) (ChallengeInfo, error) {
 	ctx, cancel := s.opCtx()
 	defer cancel()
 	result, err := challengeScript.Run(ctx, s.client,
-		[]string{secretKey, receiptKey, eventsKey, s.secretIndex(), s.receiptIndex()},
+		[]string{secretKey, receiptKey, eventsKey, s.secretIndex(), s.receiptIndex(), s.statsKey()},
 		now.UnixMilli(), eventJSON(eventExpired, now), eventJSON(eventLinkOpened, now),
 		s.grace.Milliseconds(), id,
 	).Slice()
@@ -183,12 +188,10 @@ func (s *ValkeyStore) Challenge(id string) (ChallengeInfo, error) {
 	}
 	if int64At(result, 0) != 1 {
 		if int64At(result, 3) == 1 {
-			s.incrStats("expiries")
 			s.invalidateReady()
 		}
 		return ChallengeInfo{}, nil
 	}
-	s.incrStats("opens")
 	return ChallengeInfo{
 		SecretID:  id,
 		ExpiresAt: int64At(result, 1),
@@ -206,7 +209,7 @@ func (s *ValkeyStore) Consume(id string, proofHash [32]byte) (ConsumeResult, err
 	ctx, cancel := s.opCtx()
 	defer cancel()
 	result, err := consumeScript.Run(ctx, s.client,
-		[]string{secretKey, receiptKey, eventsKey, s.secretIndex(), s.receiptIndex()},
+		[]string{secretKey, receiptKey, eventsKey, s.secretIndex(), s.receiptIndex(), s.statsKey()},
 		hex.EncodeToString(proofHash[:]),
 		now.UnixMilli(),
 		tokenHashHex(viewToken),
@@ -228,7 +231,6 @@ func (s *ValkeyStore) Consume(id string, proofHash [32]byte) (ConsumeResult, err
 		return ConsumeResult{}, ErrProofMismatch
 	case 0:
 		if int64At(result, 1) == 1 {
-			s.incrStats("expiries")
 			s.invalidateReady()
 		}
 		return ConsumeResult{}, ErrUnavailable
@@ -244,7 +246,6 @@ func (s *ValkeyStore) Consume(id string, proofHash [32]byte) (ConsumeResult, err
 			ExpiresAt:  int64At(result, 5),
 			MaxViews:   int(int64At(result, 6)),
 		}
-		s.incrStats("burns")
 		return ConsumeResult{
 			Envelope:  envelope,
 			ViewToken: viewToken,
@@ -261,7 +262,7 @@ func (s *ValkeyStore) Revoke(id, receiptToken string) (RevokeResult, error) {
 	ctx, cancel := s.opCtx()
 	defer cancel()
 	result, err := revokeScript.Run(ctx, s.client,
-		[]string{secretKey, receiptKey, eventsKey, s.secretIndex(), s.receiptIndex()},
+		[]string{secretKey, receiptKey, eventsKey, s.secretIndex(), s.receiptIndex(), s.statsKey()},
 		tokenHashHex(receiptToken),
 		now.UnixMilli(),
 		eventJSON(eventRevoked, now),
@@ -283,11 +284,6 @@ func (s *ValkeyStore) Revoke(id, receiptToken string) (RevokeResult, error) {
 	changed := int64At(result, 3) == 1
 	if changed {
 		s.invalidateReady()
-		if state == stateRevoked {
-			s.incrStats("revokes")
-		} else if state == stateExpired {
-			s.incrStats("expiries")
-		}
 	}
 	return RevokeResult{State: state, RevokedAt: int64At(result, 2)}, nil
 }
@@ -312,7 +308,7 @@ func (s *ValkeyStore) Receipt(id, receiptToken string) (ReceiptView, error) {
 	ctx, cancel := s.opCtx()
 	defer cancel()
 	raw, err := receiptScript.Run(ctx, s.client,
-		[]string{receiptKey, eventsKey, secretKey, s.secretIndex(), s.receiptIndex()},
+		[]string{receiptKey, eventsKey, secretKey, s.secretIndex(), s.receiptIndex(), s.statsKey()},
 		now.UnixMilli(), eventJSON(eventExpired, now),
 		now.Add(s.grace).UnixMilli(), id,
 	).Result()
@@ -345,7 +341,6 @@ func (s *ValkeyStore) Receipt(id, receiptToken string) (ReceiptView, error) {
 		}
 	}
 	if int64At(outer, 2) == 1 {
-		s.incrStats("expiries")
 		s.invalidateReady()
 	}
 	return ReceiptView{
@@ -403,16 +398,54 @@ func (s *ValkeyStore) Stats() StoreStats {
 // Ready mirrors the in-memory contract: it reports capacity, not just
 // reachability. Results are cached briefly so an untrusted /readyz flood
 // cannot turn into a Valkey round trip per request.
+//
+// The probe runs without readyMu held: invalidateReady is called on the write
+// path, so holding the lock across Valkey I/O would stall every create and
+// open behind a slow readiness probe.
 func (s *ValkeyStore) Ready() bool {
 	s.readyMu.Lock()
-	defer s.readyMu.Unlock()
 	now := s.now()
-	if !s.readyAt.IsZero() && now.Sub(s.readyAt) < time.Second {
-		return s.readyValue
+	if s.readyAt.IsZero() || now.Sub(s.readyAt) >= time.Second {
+		if !s.probing {
+			s.probing = true
+			s.readyMu.Unlock()
+			value := s.checkReady(now)
+			s.readyMu.Lock()
+			s.readyValue = value
+			s.readyAt = s.now()
+			s.probing = false
+			s.readyMu.Unlock()
+			return value
+		}
 	}
-	s.readyValue = s.checkReady(now)
-	s.readyAt = now
-	return s.readyValue
+	value := s.readyValue
+	s.readyMu.Unlock()
+	return value
+}
+
+// cachedUsedMemory bounds INFO memory to one round trip per quarter second on
+// the create path. The byte ceiling is a guard rail, not an accounting
+// invariant, and Valkey's own maxmemory is the hard limit.
+func (s *ValkeyStore) cachedUsedMemory(ctx context.Context) (int64, error) {
+	s.memoryMu.Lock()
+	if s.memoryValid && s.now().Sub(s.memoryAt) < 250*time.Millisecond {
+		value := s.memoryValue
+		s.memoryMu.Unlock()
+		return value, nil
+	}
+	s.memoryMu.Unlock()
+
+	used, err := s.usedMemory(ctx)
+	if err != nil {
+		return 0, err
+	}
+
+	s.memoryMu.Lock()
+	s.memoryValue = used
+	s.memoryAt = s.now()
+	s.memoryValid = true
+	s.memoryMu.Unlock()
+	return used, nil
 }
 
 func (s *ValkeyStore) checkReady(now time.Time) bool {
@@ -462,12 +495,6 @@ func (s *ValkeyStore) statsKey() string {
 
 func (s *ValkeyStore) opCtx() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), 3*time.Second)
-}
-
-func (s *ValkeyStore) incrStats(field string) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	_ = s.client.HIncrBy(ctx, s.statsKey(), field, 1).Err()
 }
 
 // liveCount counts index members whose expiry is still in the future. Expired
@@ -613,6 +640,7 @@ redis.call('RPUSH', KEYS[3], ARGV[11])
 redis.call('EXPIRE', KEYS[3], ARGV[10])
 redis.call('ZADD', KEYS[4], ARGV[6], ARGV[14])
 redis.call('ZADD', KEYS[5], ARGV[9], ARGV[14])
+redis.call('HINCRBY', KEYS[6], 'creates', 1)
 return 1
 `)
 
@@ -636,9 +664,11 @@ if redis.call('EXISTS', KEYS[1]) == 0 or expires <= now then
   redis.call('LTRIM', KEYS[3], -64, -1)
   redis.call('ZREM', KEYS[4], ARGV[5])
   redis.call('ZADD', KEYS[5], retention, ARGV[5])
+  redis.call('HINCRBY', KEYS[6], 'expiries', 1)
   return {0,0,0,1}
 end
 local opens = redis.call('HINCRBY', KEYS[2], 'opens', 1)
+redis.call('HINCRBY', KEYS[6], 'opens', 1)
 redis.call('HSET', KEYS[2], 'last_opened_at', ARGV[1])
 if opens == 1 then
   redis.call('RPUSH', KEYS[3], ARGV[3])
@@ -658,7 +688,6 @@ local retention = math.max(existing, tonumber(ARGV[7]))
 local ttl = math.ceil((retention - now) / 1000)
 if ttl < 1 then ttl = 1 end
 if redis.call('EXISTS', KEYS[1]) == 0 or expires <= now then
-  redis.call('DEL', KEYS[1])
   redis.call('HSET', KEYS[2], 'state', 'expired', 'receipt_expires_at', retention)
   redis.call('EXPIRE', KEYS[2], ttl)
   redis.call('EXPIRE', KEYS[3], ttl)
@@ -666,6 +695,8 @@ if redis.call('EXISTS', KEYS[1]) == 0 or expires <= now then
   redis.call('LTRIM', KEYS[3], -64, -1)
   redis.call('ZREM', KEYS[4], ARGV[9])
   redis.call('ZADD', KEYS[5], retention, ARGV[9])
+  redis.call('HINCRBY', KEYS[6], 'expiries', 1)
+  redis.call('DEL', KEYS[1])
   return {0,1}
 end
 local proof = redis.call('HGET', KEYS[1], 'proof_hash')
@@ -676,7 +707,6 @@ local tag = redis.call('HGET', KEYS[1], 'tag')
 local created = redis.call('HGET', KEYS[1], 'created_at')
 local exp = redis.call('HGET', KEYS[1], 'expires_at')
 local maxViews = redis.call('HGET', KEYS[1], 'max_views')
-redis.call('DEL', KEYS[1])
 redis.call('HSET', KEYS[2],
   'state','burned',
   'burned_at',ARGV[2],
@@ -690,6 +720,10 @@ redis.call('EXPIRE', KEYS[2], ttl)
 redis.call('EXPIRE', KEYS[3], ttl)
 redis.call('ZREM', KEYS[4], ARGV[9])
 redis.call('ZADD', KEYS[5], retention, ARGV[9])
+redis.call('HINCRBY', KEYS[6], 'burns', 1)
+-- Delete last: Lua has no rollback, so a failure above must leave the secret
+-- readable rather than silently destroying it before the receipt is written.
+redis.call('DEL', KEYS[1])
 return {1, iv, ct, tag, created, exp, maxViews}
 `)
 
@@ -712,6 +746,7 @@ if state == 'available' then
     redis.call('LTRIM', KEYS[3], -64, -1)
     redis.call('ZREM', KEYS[4], ARGV[7])
     redis.call('ZADD', KEYS[5], retention, ARGV[7])
+    redis.call('HINCRBY', KEYS[6], 'expiries', 1)
     return {1, 'expired', '', 1}
   end
   redis.call('DEL', KEYS[1])
@@ -722,6 +757,7 @@ if state == 'available' then
   redis.call('LTRIM', KEYS[3], -64, -1)
   redis.call('ZREM', KEYS[4], ARGV[7])
   redis.call('ZADD', KEYS[5], retention, ARGV[7])
+  redis.call('HINCRBY', KEYS[6], 'revokes', 1)
   return {1, 'revoked', ARGV[2], 1}
 end
 local revokedAt = redis.call('HGET', KEYS[2], 'revoked_at') or ''
@@ -758,6 +794,7 @@ if state == 'available' and expires <= tonumber(ARGV[1]) and redis.call('EXISTS'
   redis.call('LTRIM', KEYS[2], -64, -1)
   redis.call('ZREM', KEYS[4], ARGV[4])
   redis.call('ZADD', KEYS[5], retention, ARGV[4])
+  redis.call('HINCRBY', KEYS[6], 'expiries', 1)
   changed = 1
 end
 local vals = redis.call('HMGET', KEYS[1],
