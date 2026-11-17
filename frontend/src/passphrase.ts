@@ -18,7 +18,7 @@ const AGENTS =
     " ",
   );
 
-const VERBS = "carries finds holds keeps hides seeks saves brings".split(" ");
+const VERBS = "carries finds keeps hides saves brings".split(" ");
 
 const OBJECTS =
   "key lantern coin map letter bottle basket blanket camera compass ticket ribbon pebble shell book cup spoon hat scarf glove boot bell candle mirror brush comb rope net sail oar wheel anchor flag drum flute violin clock watch ring bracelet necklace badge medal pencil notebook envelope stamp parcel box crate jar pot pan kettle teapot plate bowl knife fork towel pillow cushion curtain rug".split(
@@ -30,23 +30,19 @@ const PLACES =
     " ",
   );
 
-const PREPOSITIONS = "under near beside beyond behind past around above".split(
-  " ",
-);
-
 /**
- * A grammatical phrase with about 39 bits of choice entropy. That is lower
- * than six independent 256-word picks, but PBKDF2-SHA256 at 600k rounds makes
- * offline guessing expensive. Rejection sampling avoids modulo bias.
+ * A five-word sentence: "bold otter keeps silver key". Five slots give
+ * 32 x 59 x 8 x 32 x 64 = 2^24.9 bits of choice entropy, which is a speed bump,
+ * not a secret: PBKDF2-SHA256 at 600k rounds only slows offline guessing. The
+ * UI says so next to the button; a self-chosen long passphrase is the actual
+ * protection. Rejection sampling avoids modulo bias.
  */
 export function generatePassphrase(): string {
-  const objectAdjective = pick(OBJECT_ADJECTIVES);
   return [
     pick(AGENT_ADJECTIVES),
     pick(AGENTS),
     pick(VERBS),
-    /^[aeiou]/.test(objectAdjective) ? "an" : "a",
-    objectAdjective,
+    pick(OBJECT_ADJECTIVES),
     pick(OBJECTS),
   ].join(" ");
 }

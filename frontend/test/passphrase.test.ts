@@ -4,11 +4,8 @@ import { generatePassphrase } from "../src/passphrase.ts";
 
 test("passphrase is a grammatical lowercase phrase", () => {
   const phrase = generatePassphrase();
-  assert.match(
-    phrase,
-    /^[a-z]+ [a-z]+ [a-z]+ (?:a|an) [a-z]+ [a-z]+$/,
-  );
-  assert.equal(phrase.split(" ").length, 6);
+  assert.match(phrase, /^[a-z]+ [a-z]+ [a-z]+ [a-z]+ [a-z]+$/);
+  assert.equal(phrase.split(" ").length, 5);
 });
 
 test("generated phrases differ", () => {
