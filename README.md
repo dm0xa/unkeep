@@ -216,10 +216,10 @@ Header `X-Receipt-Token`. Returns state, timestamps, `opens`, `lastOpenedAt`,
 - Fresh 12-byte IV per encryption.
 - Passphrase fragments use PBKDF2-SHA256 (600k rounds, 16-byte salt) and
 AES-GCM key wrapping; wrong passphrase burns nothing.
-- The built-in passphrase generator builds a 10-word sentence from
-32/59/8/64/32/64/8/32 word slots (~39 bits of choice entropy). That is weaker
-than a random 128-bit key, so use your own longer passphrase for sensitive
-secrets.
+- The built-in passphrase generator builds a five-word sentence
+(32/59/8/32/64 word slots, ~25 bits of choice entropy). That is a speed bump on
+offline guessing, not a secret: use your own long passphrase for anything
+sensitive. The generator exists so a person can retype one.
 - Passphrase attempts are throttled in the browser: the first two failures are
 free, then cooldowns of 5 s, 15 s, 60 s, 3 min, and 5 min (capped) are kept per
 link in `sessionStorage`, so a reload does not reset them. The server never
@@ -257,10 +257,11 @@ volatile.
 | `ADDR`                           | empty       | Overrides `HOST:PORT`.                             |
 | `TLS_CERT_FILE` / `TLS_KEY_FILE` | empty       | Direct TLS; set both.                              |
 | `TRUST_PROXY`                    | `false`     | Trust proxy forwarding headers.                    |
+| `TRUST_PROXY_HOPS`               | `1`         | Proxies that append to `X-Forwarded-For`.          |
 | `ALLOWED_HOSTS`                  | loopback    | Host allowlist for API routes.                     |
 | `VALKEY_URL`                     | empty       | RESP URL; empty = in-process.                      |
 | `VALKEY_PREFIX`                  | `ns:`       | Valkey key prefix.                                 |
-| `SESSION_SECRET`                 | generated   | Base64url ≥32 random bytes; required for replicas. |
+| `SESSION_SECRET`                 | generated   | Base64url ≥32 random bytes; required with Valkey.  |
 | `MIN_TTL_SECONDS`                | `60`        | Minimum sender TTL.                                |
 | `MAX_TTL_SECONDS`                | `604800`    | Maximum TTL.                                       |
 | `DEFAULT_TTL_SECONDS`            | `86400`     | TTL when omitted.                                  |
@@ -291,7 +292,15 @@ HOST=0.0.0.0 PORT=8080 TRUST_PROXY=1 ALLOWED_HOSTS=app.example.com \
   ./bin/unkeep
 ```
 
-Only trust proxy headers when the proxy overwrites them.
+Text assets are already gzip-precompressed in process (precomputed at startup,
+`Vary: Accept-Encoding`), so leave proxy compression off or it compresses twice.
+The document is served with the stylesheet and the theme boot script inlined and
+pinned by CSP hashes, so a first visit needs two requests (document, `app.js`).
+
+Only trust proxy headers when the proxy overwrites them. The client address is
+read `TRUST_PROXY_HOPS` entries from the right of `X-Forwarded-For` (the hop your
+own proxy appended), so a client that sends its own header cannot pick its rate
+limit bucket. IPv6 addresses are aggregated per `/64` for rate limiting.
 
 ## Limits
 
@@ -310,8 +319,14 @@ defense against offline guessing of a wrapped link.
 Valkey deletes keys but cannot promise allocator-level zeroing.
 - Client-side clearing is best-effort; browser strings cannot be zeroed.
 - No malware defense. No CAPTCHA; a scripted browser can still drive the flow.
-- Metrics are opt-in. In-process capacity can take up to five seconds to
-recover after expiry; Valkey prunes its indexes on create.
+- A leaked link ID (not the fragment) is enough to make the sender's receipt
+show an extra open; it cannot release the ciphertext without the key proof.
+- Metrics are opt-in. In-process capacity can lag expiry by up to one second
+(the create path re-sweeps expired records at most once a second); Valkey prunes
+its indexes on create.
+- The sender's result page holds the only copy of the link. It warns before
+unloading, but a closed tab still loses the link; the ciphertext stays stored
+until its TTL expires.
 
 ## Testing
 

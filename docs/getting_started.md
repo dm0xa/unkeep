@@ -150,7 +150,10 @@ env HOST=0.0.0.0 PORT=8080 TRUST_PROXY=1 \
   ./bin/unkeep
 ```
 
-Only trust proxy headers when the proxy overwrites them.
+Only trust proxy headers when the proxy overwrites them. `TRUST_PROXY_HOPS=1`
+means one proxy appends to `X-Forwarded-For`; raise it if you run more. With
+`VALKEY_URL` set, a missing `SESSION_SECRET` is a startup error, not a silently
+per-process key that breaks challenges across replicas.
 
 ## Essentials
 

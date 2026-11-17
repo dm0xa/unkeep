@@ -279,8 +279,8 @@ option.
   whole row toggles.
 - Off is a paper track with a `line-2` border; on is amber with an ink knob.
 - Turning it on reveals a mono input with inline **Copy** and **Generate**
-  controls and focuses it. Generate writes a ten-word grammatical phrase
-  (about 39 bits), switches the field to text, and focuses it; Copy copies it.
+  controls and focuses it. Generate writes a five-word sentence
+  (25 bits of choice entropy), switches the field to text, and focuses it; Copy copies it.
   The hint below reads "At least 8 characters. Share it another way. Without
   it, the link is useless." Turning it off clears the field.
 - The inline controls are 32 px tall, 6 px radius, `--well` ground, 12 px 600;
