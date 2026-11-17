@@ -108,6 +108,11 @@ func NewServer(cfg Config) (*Server, error) {
 	if cfg.TrustProxyHops < 1 {
 		cfg.TrustProxyHops = 1
 	}
+	// Nonces and cookies are signed per process, so replicas must share the
+	// secret or a challenge issued by one replica is rejected by the next.
+	if cfg.ValkeyURL != "" && cfg.SessionSecret == nil {
+		return nil, fmt.Errorf("SESSION_SECRET is required when VALKEY_URL is set")
+	}
 	if cfg.SessionSecret == nil {
 		cfg.SessionSecret = make([]byte, 32)
 		if _, err := rand.Read(cfg.SessionSecret); err != nil {
